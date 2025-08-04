@@ -25,6 +25,7 @@ def run_with_timeout(program_path, timeout_seconds=60):
     try:
         # Run the command and grab its output using subprocess.Popen
         proc = subprocess.Popen(cmd_compile, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        #proc = subprocess.Popen(cmd_compile, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = proc.communicate(timeout=timeout_seconds)
         exit_code = proc.returncode
         if exit_code != 0:
@@ -39,6 +40,7 @@ def run_with_timeout(program_path, timeout_seconds=60):
     try:
         # Run the command and grab its output using subprocess.Popen
         proc = subprocess.Popen(cmd_run, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        #proc = subprocess.Popen(cmd_run, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = proc.communicate(timeout=timeout_seconds)
         exit_code = proc.returncode
         if exit_code != 0:
@@ -98,7 +100,7 @@ def evaluate(program_path):
         eval_time = end_time - start_time
 
         # Combined score - higher is better
-        combined_score = correct / total if total > 0 else 0.0
+        #combined_score = correct / total if total > 0 else 0.0
 
         print(
             f"Kernel Execution Time: ={exec_time} ms, Memory Bandwidth={mem_bdw} GB/sec, Evaluation Time={eval_time} sec"
