@@ -1,6 +1,19 @@
 
 module load cuda/12.0.0
-nvcc -o mtxTranspose main.cu matrix_transpose_kernel.cu
+#nvcc -o mtxTranspose main.cu matrix_transpose_kernel.cu
+
+```
+# to compile:
+make 
+# to test :
+make test 
+# to run a quick benchamrk 
+make benchmark 
+
+#general use: 
+./transpose n_rows n_cols
+```
+
 $ ./mtxTranspose 
 Input matrix (3x4):
 0 1 2 3 
