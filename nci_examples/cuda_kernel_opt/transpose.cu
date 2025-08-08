@@ -3,7 +3,7 @@
 #include <random>
 #include <cstdlib>
 #include <iomanip>
-
+#define BLOCK_DIM 8
 __global__ void matrixTranspose(float* out, const float* in, int width, int height) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -74,7 +74,7 @@ int main(int argc, char* argv[]) {
     cudaMemcpy(d_in, h_in, size, cudaMemcpyHostToDevice);
     
     // Launch kernel
-    dim3 blockDim(1, 1);
+    dim3 blockDim(BLOCK_DIM, BLOCK_DIM);
     dim3 gridDim((width + blockDim.x - 1) / blockDim.x,
                  (height + blockDim.y - 1) / blockDim.y);
     
