@@ -4,9 +4,10 @@
 #include <random>
 #include <cstdlib>
 #include <iomanip>
-#define BLOCK_DIM 8
 
 // EVOLVE-BLOCK-START
+
+#define BLOCK_DIM 8
 
 __global__ void matrixTranspose(float* out, const float* in, int width, int height) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
