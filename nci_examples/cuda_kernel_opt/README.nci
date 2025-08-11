@@ -23,3 +23,26 @@ Type "help", "copyright", "credits" or "license" for more information.
 Kernel Execution Time: =2.19853 ms, Memory Bandwidth=4.06667e-05 GB/sec, Evaluation Time=3.611257791519165 sec
 {'exec_time': 2.19853, 'mem_bdw': 4.06667e-05, 'eval_time': 3.611257791519165}
 
+
+
+python3 openevolve-run.py initial_program.cu evaluator.py --config config_gemini.yaml
+python3 openevolve-run.py initial_program.cu evaluator.py --config config_nv.yaml
+
+
+qsub -I -qgpuvolta -lwalltime=00:10:00,ncpus=12,ngpus=1,mem=60GB,storage=scratch/z00,wd
+
+$ ./test datasets/S_14_0.1.txt 14
+Matrix size: 14 x 14 (196 elements)
+Matrix too large to display
+
+Grid dimensions: 14 x 14 = 196 blocks
+Block dimensions: 1 x 1 = 1 threads per block
+Total threads: 196
+
+Total data moved: 0.00149536 MB
+Kernel execution time: 0.007168 ms
+Effective memory bandwidth: 0.203727 GB/s
+
+Transposed matrix too large to display
+Transpose verification: PASSED
+

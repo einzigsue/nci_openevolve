@@ -131,7 +131,8 @@ h1 span { font-size: 0.5em; color: #666; }
     position: fixed;
     top: var(--toolbar-height);
     right: 0;
-    width: 400px;
+    /*width: 400px;*/
+    width: 900px;
     max-width: 90vw;
     height: calc(100vh - var(--toolbar-height));
     background: var(--sidebar-bg);

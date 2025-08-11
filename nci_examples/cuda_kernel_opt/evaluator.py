@@ -6,7 +6,7 @@ import re
 import subprocess
 import time
 import traceback
-
+import random
 
 def run_with_timeout(program_path, timeout_seconds=60):
     """
@@ -21,7 +21,7 @@ def run_with_timeout(program_path, timeout_seconds=60):
     Returns:
         Result of the function or raises TimeoutError
     """
-    cmd_compile = ["nvcc", "-o", "mtxTranspose", "main.cu", program_path]
+    cmd_compile = ["nvcc", "-o", "mtxTranspose", program_path]
     try:
         # Run the command and grab its output using subprocess.Popen
         proc = subprocess.Popen(cmd_compile, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -36,7 +36,11 @@ def run_with_timeout(program_path, timeout_seconds=60):
         proc.kill()
         raise TimeoutError(f"Process timed out after {timeout_seconds} seconds")
 
-    cmd_run = ["./mtxTranspose",]
+    #nrow = random.randint(11,20)
+    #ncol = random.randint(11,20)
+    nrow = 16384
+    ncol = 16381
+    cmd_run = ["./mtxTranspose", str(nrow), str(ncol)]
     try:
         # Run the command and grab its output using subprocess.Popen
         proc = subprocess.Popen(cmd_run, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
