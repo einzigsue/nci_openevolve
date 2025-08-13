@@ -157,7 +157,7 @@ class OpenEvolve:
             self.llm_evaluator_ensemble,
             self.evaluator_prompt_sampler,
             database=self.database,
-            suffix=Path(self.initial_program_path).suffix,
+            suffix=self.file_extension,
         )
         self.evaluation_file = evaluation_file
 
