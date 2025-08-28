@@ -237,3 +237,80 @@ void run_verification(int n, int steps) {
     }
 }
 
+// Performance benchmark
+void run_benchmark(int n, int steps) {
+    printf("\n=== PERFORMANCE BENCHMARK ===\n");
+    printf("Particles: %d, Steps: %d\n", n, steps);
+    
+    size_t bytes = n * sizeof(float4);
+    
+    // Allocate memory
+    float4* h_pos_a = (float4*)malloc(bytes);
+    float4* h_vel_a = (float4*)malloc(bytes);
+    
+    float4 *d_pos_a, *d_vel_a, *d_pos_b, *d_vel_b;
+    cudaMalloc(&d_pos_a, bytes);
+    cudaMalloc(&d_vel_a, bytes);
+    cudaMalloc(&d_pos_b, bytes);
+    cudaMalloc(&d_vel_b, bytes);
+    
+    // Initialize
+    srand(42);
+    for (int i = 0; i < n; i++) {
+        h_pos_a[i].x = 2.0f * (rand() / (float)RAND_MAX) - 1.0f;
+        h_pos_a[i].y = 2.0f * (rand() / (float)RAND_MAX) - 1.0f;
+        h_pos_a[i].z = 2.0f * (rand() / (float)RAND_MAX) - 1.0f;
+        h_pos_a[i].w = 1.0f;
+        
+        h_vel_a[i].x = 0.1f * (2.0f * (rand() / (float)RAND_MAX) - 1.0f);
+        h_vel_a[i].y = 0.1f * (2.0f * (rand() / (float)RAND_MAX) - 1.0f);
+        h_vel_a[i].z = 0.1f * (2.0f * (rand() / (float)RAND_MAX) - 1.0f);
+        h_vel_a[i].w = 0.0f;
+    }
+    
+    cudaMemcpy(d_pos_a, h_pos_a, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_vel_a, h_vel_a, bytes, cudaMemcpyHostToDevice);
+    
+    // Timing
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    
+    // Warmup
+    nbody_gpu_step(d_pos_a, d_vel_a, d_pos_b, d_vel_b, 0.01f, n);
+    
+    cudaEventRecord(start);
+    
+    // Benchmark loop
+    for (int step = 0; step < steps; step++) {
+        nbody_gpu_step(d_pos_a, d_vel_a, d_pos_b, d_vel_b, 0.01f, n);
+        
+        // Swap buffers
+        float4* temp;
+        temp = d_pos_a; d_pos_a = d_pos_b; d_pos_b = temp;
+        temp = d_vel_a; d_vel_a = d_vel_b; d_vel_b = temp;
+    }
+    
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    
+    float elapsed_ms;
+    cudaEventElapsedTime(&elapsed_ms, start, stop);
+    float avg_time_per_step = elapsed_ms / steps;
+    
+    // Calculate metrics
+    long long interactions = (long long)n * (n - 1);
+    // the total flops per force calc can be measured differently
+    long long total_flops = interactions * 15;
+    float gflops = (total_flops / 1e9) / (avg_time_per_step / 1000.0f);
+    
+    printf("Total time: %.2f ms\n", elapsed_ms);
+    printf("Time per step: %.2f ms\n", avg_time_per_step);
+    printf("GFLOPS: %.2f\n", gflops);
+    
+    // Cleanup
+    free(h_pos_a); free(h_vel_a);
+    cudaFree(d_pos_a); cudaFree(d_vel_a); cudaFree(d_pos_b); cudaFree(d_vel_b);
+    cudaEventDestroy(start); cudaEventDestroy(stop);
+}
+
