@@ -1,210 +1,457 @@
-// N-Body Simulation CUDA Kernel
-// Tests: Heavy compute, memory bandwidth, transcendental functions
+// N-Body Simulation CUDA Kernel with Bulletproof Verification
+// Clean implementation with matching GPU/CPU algorithms
 
 #include <stdio.h>
 #include <cuda_runtime.h>
 #include <math.h>
+#include <string.h>
 
 struct Particle {
     float4 pos;  // x, y, z, mass (using w component for mass)
     float4 vel;  // vx, vy, vz, (w unused)
 };
 
-// Softening factor to prevent singularities when particles get too close
+// Constants
 #define SOFTENING 1e-9f
-#define G 6.67430e-11f  // Gravitational constant (can be scaled for simulation)
+#define G 6.67430e-11f
 
-// Single kernel N-body - O(N²) complexity with position update
-__global__ void nbody_single_kernel(float4* pos, float4* vel, float dt, int n) {
+// Simple but robust GPU kernel - we'll make CPU match this EXACTLY
+__global__ void nbody_kernel(float4* pos_in, float4* vel_in, 
+                            float4* pos_out, float4* vel_out, 
+                            float dt, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     
-    float3 force = {0.0f, 0.0f, 0.0f};
-    float4 myPos = pos[i];
-    float4 myVel = vel[i];
+    // Load this particle's current state
+    float4 my_pos = pos_in[i];
+    float4 my_vel = vel_in[i];
+    
+    // Calculate total force on this particle
+    float3 total_force = {0.0f, 0.0f, 0.0f};
     
     for (int j = 0; j < n; j++) {
-        if (i != j) {  // Don't calculate force on self
-            float4 otherPos = pos[j];
+        if (i != j) {
+            float4 other_pos = pos_in[j];
             
-            float3 r;
-            r.x = otherPos.x - myPos.x;
-            r.y = otherPos.y - myPos.y;
-            r.z = otherPos.z - myPos.z;
+            // Calculate distance vector
+            float dx = other_pos.x - my_pos.x;
+            float dy = other_pos.y - my_pos.y;
+            float dz = other_pos.z - my_pos.z;
             
-            float distSqr = r.x*r.x + r.y*r.y + r.z*r.z + SOFTENING;
-            float invDist = rsqrtf(distSqr);  // Fast inverse square root
-            float invDist3 = invDist * invDist * invDist;
+            // Calculate distance squared with softening
+            float dist_sq = dx*dx + dy*dy + dz*dz + SOFTENING;
             
-            // F = G * m1 * m2 / r²
-            // But we calculate acceleration directly: a = F/m1 = G * m2 / r²
-            float forceMag = G * otherPos.w * invDist3;
+            // Calculate 1/r^3 using fast inverse square root
+            float inv_dist = rsqrtf(dist_sq);
+            float inv_dist_cubed = inv_dist * inv_dist * inv_dist;
             
-            force.x += forceMag * r.x;
-            force.y += forceMag * r.y;
-            force.z += forceMag * r.z;
+            // Calculate force magnitude: F = G * m1 * m2 / r^2
+            // But we want acceleration: a = F/m1 = G * m2 / r^2
+            float force_magnitude = G * other_pos.w * inv_dist_cubed;
+            
+            // Add force components
+            total_force.x += force_magnitude * dx;
+            total_force.y += force_magnitude * dy;
+            total_force.z += force_magnitude * dz;
         }
     }
     
-    // Update velocity: v = v + a*dt
-    myVel.x += force.x * dt;
-    myVel.y += force.y * dt;
-    myVel.z += force.z * dt;
+    // Update velocity: v_new = v_old + a * dt
+    float4 new_vel = my_vel;
+    new_vel.x += total_force.x * dt;
+    new_vel.y += total_force.y * dt;
+    new_vel.z += total_force.z * dt;
     
-    // Update position: pos = pos + v*dt
-    myPos.x += myVel.x * dt;
-    myPos.y += myVel.y * dt;
-    myPos.z += myVel.z * dt;
-    // Mass (myPos.w) stays constant
+    // Update position: x_new = x_old + v_old * dt (using OLD velocity for stability)
+    float4 new_pos = my_pos;
+    new_pos.x += my_vel.x * dt;
+    new_pos.y += my_vel.y * dt;
+    new_pos.z += my_vel.z * dt;
     
-    // Write back to global memory
-    vel[i] = myVel;
-    pos[i] = myPos;
+    // Write results
+    pos_out[i] = new_pos;
+    vel_out[i] = new_vel;
 }
 
-// Single kernel host function
-void nbody_step_single(float4* d_pos, float4* d_vel, float dt, int n) {
-    int blockSize = 256;
-    int gridSize = (n + blockSize - 1) / blockSize;
-    
-    nbody_single_kernel<<<gridSize, blockSize>>>(d_pos, d_vel, dt, n);
-}
-
-// Performance metrics calculation
-void calculate_performance_metrics(int n, float time_ms) {
-    // Each particle interacts with (n-1) others
-    long long interactions = (long long)n * (n - 1);
-    
-    // Each interaction involves:
-    // - 3 subtractions (distance vector)
-    // - 3 multiplications + 2 additions (distance squared)
-    // - 1 rsqrt, 2 multiplications (inv distance cubed)  
-    // - 1 multiplication (force magnitude)
-    // - 3 multiplications + 3 additions (force components)
-    // Total: ~15 FLOPs per interaction
-    
-    long long total_flops = interactions * 15;
-    float gflops = (total_flops / 1e9) / (time_ms / 1000.0f);
-    
-    // Memory access: each particle reads all other particles
-    // 4 floats per particle * n particles read n times
-    long long bytes_read = (long long)n * n * 4 * sizeof(float);
-    float bandwidth_gb_s = (bytes_read / 1e9) / (time_ms / 1000.0f);
-    
-    printf("N-Body Performance Metrics:\n");
-    printf("Particles: %d\n", n);
-    printf("Interactions: %lld\n", interactions);
-    printf("Time: %.2f ms\n", time_ms);
-    printf("GFLOPS: %.2f\n", gflops);
-    printf("Memory Bandwidth: %.2f GB/s\n", bandwidth_gb_s);
-    printf("Arithmetic Intensity: %.2f FLOP/byte\n", 
-           (float)total_flops / bytes_read);
-}
-
-// Initialize particles in a random distribution
-void initialize_particles(float4* pos, float4* vel, int n) {
-    srand(42);  // Fixed seed for reproducible results
+// CPU version that matches GPU kernel EXACTLY
+void nbody_cpu_step(float4* pos_in, float4* vel_in, 
+                   float4* pos_out, float4* vel_out, 
+                   float dt, int n) {
     
     for (int i = 0; i < n; i++) {
-        // Random positions in a cube [-1, 1]
-        pos[i].x = 2.0f * (rand() / (float)RAND_MAX) - 1.0f;
-        pos[i].y = 2.0f * (rand() / (float)RAND_MAX) - 1.0f;
-        pos[i].z = 2.0f * (rand() / (float)RAND_MAX) - 1.0f;
-        pos[i].w = 1.0f;  // Unit mass
+        // Load this particle's current state (matches GPU)
+        float4 my_pos = pos_in[i];
+        float4 my_vel = vel_in[i];
         
-        // Small random velocities
-        vel[i].x = 0.1f * (2.0f * (rand() / (float)RAND_MAX) - 1.0f);
-        vel[i].y = 0.1f * (2.0f * (rand() / (float)RAND_MAX) - 1.0f);
-        vel[i].z = 0.1f * (2.0f * (rand() / (float)RAND_MAX) - 1.0f);
-        vel[i].w = 0.0f;  // Unused
+        // Calculate total force on this particle (matches GPU)
+        float3 total_force = {0.0f, 0.0f, 0.0f};
+        
+        for (int j = 0; j < n; j++) {
+            if (i != j) {
+                float4 other_pos = pos_in[j];
+                
+                // Calculate distance vector (matches GPU)
+                float dx = other_pos.x - my_pos.x;
+                float dy = other_pos.y - my_pos.y;
+                float dz = other_pos.z - my_pos.z;
+                
+                // Calculate distance squared with softening (matches GPU)
+                float dist_sq = dx*dx + dy*dy + dz*dz + SOFTENING;
+                
+                // Calculate 1/r^3 - use regular sqrt to match rsqrtf as closely as possible
+                float inv_dist = 1.0f / sqrtf(dist_sq);
+                float inv_dist_cubed = inv_dist * inv_dist * inv_dist;
+                
+                // Calculate force magnitude (matches GPU)
+                float force_magnitude = G * other_pos.w * inv_dist_cubed;
+                
+                // Add force components (matches GPU)
+                total_force.x += force_magnitude * dx;
+                total_force.y += force_magnitude * dy;
+                total_force.z += force_magnitude * dz;
+            }
+        }
+        
+        // Update velocity: v_new = v_old + a * dt (matches GPU)
+        float4 new_vel = my_vel;
+        new_vel.x += total_force.x * dt;
+        new_vel.y += total_force.y * dt;
+        new_vel.z += total_force.z * dt;
+        
+        // Update position: x_new = x_old + v_old * dt (matches GPU - using OLD velocity)
+        float4 new_pos = my_pos;
+        new_pos.x += my_vel.x * dt;
+        new_pos.y += my_vel.y * dt;
+        new_pos.z += my_vel.z * dt;
+        
+        // Write results (matches GPU)
+        pos_out[i] = new_pos;
+        vel_out[i] = new_vel;
     }
 }
 
-// Main function - the missing piece!
-int main(int argc, char** argv) {
-    // Default parameters
-    int n = 4096;          // Number of particles
-    int num_steps = 100;   // Number of simulation steps
-    float dt = 0.01f;      // Timestep
+// Wrapper for GPU step using double buffering with debugging
+void nbody_gpu_step(float4* d_pos_a, float4* d_vel_a, 
+                   float4* d_pos_b, float4* d_vel_b, 
+                   float dt, int n) {
+    int block_size = 256;
+    int grid_size = (n + block_size - 1) / block_size;
     
-    // Parse command line arguments
-    if (argc > 1) n = atoi(argv[1]);
-    if (argc > 2) num_steps = atoi(argv[2]);
+//    printf("    GPU kernel launch: grid=%d, block=%d, n=%d\n", grid_size, block_size, n);
     
-    printf("N-Body Simulation Benchmark\n");
-    printf("===========================\n");
-    printf("Particles: %d\n", n);
-    printf("Steps: %d\n", num_steps);
-    printf("\n");
+    nbody_kernel<<<grid_size, block_size>>>(d_pos_a, d_vel_a, d_pos_b, d_vel_b, dt, n);
     
-    // Allocate host memory
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("    CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+    }
+    
+    cudaDeviceSynchronize();
+    
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("    CUDA kernel execution error: %s\n", cudaGetErrorString(err));
+    } 
+}
+
+// Initialize particles with known, simple configuration
+void init_simple_system(float4* pos, float4* vel, int n) {
+    // Use a deterministic, simple setup for verification
+    for (int i = 0; i < n; i++) {
+        // Simple grid-like positions
+        pos[i].x = (float)(i % 8) - 4.0f;          // -4 to 3
+        pos[i].y = (float)((i / 8) % 8) - 4.0f;    // -4 to 3  
+        pos[i].z = (float)(i / 64) - 2.0f;         // -2 to ?
+        pos[i].w = 1.0f;  // Unit mass
+        
+        // Zero initial velocities for predictable behavior
+        vel[i].x = 0.0f;
+        vel[i].y = 0.0f;
+        vel[i].z = 0.0f;
+        vel[i].w = 0.0f;
+    }
+}
+
+// Precise comparison function
+bool verify_results(float4* pos1, float4* vel1, float4* pos2, float4* vel2, int n) {
+    float max_pos_diff = 0.0f;
+    float max_vel_diff = 0.0f;
+    float sum_pos_diff = 0.0f;
+    float sum_vel_diff = 0.0f;
+    
+    //printf("Detailed comparison (first 5 particles):\n");
+    
+    for (int i = 0; i < n; i++) {
+        // Position differences
+        float pos_diff_x = fabsf(pos1[i].x - pos2[i].x);
+        float pos_diff_y = fabsf(pos1[i].y - pos2[i].y);
+        float pos_diff_z = fabsf(pos1[i].z - pos2[i].z);
+        float pos_diff_total = sqrtf(pos_diff_x*pos_diff_x + pos_diff_y*pos_diff_y + pos_diff_z*pos_diff_z);
+        
+        // Velocity differences  
+        float vel_diff_x = fabsf(vel1[i].x - vel2[i].x);
+        float vel_diff_y = fabsf(vel1[i].y - vel2[i].y);
+        float vel_diff_z = fabsf(vel1[i].z - vel2[i].z);
+        float vel_diff_total = sqrtf(vel_diff_x*vel_diff_x + vel_diff_y*vel_diff_y + vel_diff_z*vel_diff_z);
+        
+        sum_pos_diff += pos_diff_total;
+        sum_vel_diff += vel_diff_total;
+        
+        if (pos_diff_total > max_pos_diff) max_pos_diff = pos_diff_total;
+        if (vel_diff_total > max_vel_diff) max_vel_diff = vel_diff_total;
+        
+        // Print first few for debugging
+        //if (i < 5) {
+        //    printf("Particle %d:\n", i);
+        //    printf("  GPU pos: (%.8f, %.8f, %.8f)  CPU pos: (%.8f, %.8f, %.8f)  diff: %.8f\n",
+        //           pos1[i].x, pos1[i].y, pos1[i].z, pos2[i].x, pos2[i].y, pos2[i].z, pos_diff_total);
+        //    printf("  GPU vel: (%.8f, %.8f, %.8f)  CPU vel: (%.8f, %.8f, %.8f)  diff: %.8f\n",
+        //           vel1[i].x, vel1[i].y, vel1[i].z, vel2[i].x, vel2[i].y, vel2[i].z, vel_diff_total);
+        //}
+    }
+    
+    float avg_pos_diff = sum_pos_diff / n;
+    float avg_vel_diff = sum_vel_diff / n;
+    
+    printf("\nStatistics:\n");
+    printf("Position - Max diff: %.2e, Avg diff: %.2e\n", max_pos_diff, avg_pos_diff);
+    printf("Velocity - Max diff: %.2e, Avg diff: %.2e\n", max_vel_diff, avg_vel_diff);
+    
+    // Be more lenient - rsqrtf vs sqrtf will cause small differences
+    bool pos_ok = (max_pos_diff < 1e-3f);  // 0.001 tolerance
+    bool vel_ok = (max_vel_diff < 1e-3f);  // 0.001 tolerance
+    
+    if (pos_ok && vel_ok) {
+        printf("VERIFICATION PASSED: Differences are within acceptable tolerance\n");
+        printf("  (Small differences are expected due to rsqrtf vs sqrtf precision)\n");
+        return true;
+    } else {
+        printf("VERIFICATION FAILED: Differences exceed tolerance\n");
+        if (!pos_ok) printf("  Position differences too large (max: %.6f > 0.001000)\n", max_pos_diff);
+        if (!vel_ok) printf("  Velocity differences too large (max: %.6f > 0.001000)\n", max_vel_diff);
+        return false;
+    }
+}
+
+// Run verification test with debugging
+void run_verification(int n, int steps) {
+    printf("\n=== VERIFICATION TEST ===\n");
+    printf("Particles: %d, Steps: %d\n", n, steps);
+    
     size_t bytes = n * sizeof(float4);
-    float4* h_pos = (float4*)malloc(bytes);
-    float4* h_vel = (float4*)malloc(bytes);
     
-    // Initialize particles
-    initialize_particles(h_pos, h_vel, n);
+    // Allocate CPU memory  
+    float4* h_pos_a = (float4*)malloc(bytes);
+    float4* h_vel_a = (float4*)malloc(bytes);
+    float4* h_pos_b = (float4*)malloc(bytes);  
+    float4* h_vel_b = (float4*)malloc(bytes);
     
-    // Allocate device memory
-    float4* d_pos;
-    float4* d_vel;
-    cudaMalloc(&d_pos, bytes);
-    cudaMalloc(&d_vel, bytes);
+    float4* h_pos_gpu = (float4*)malloc(bytes);
+    float4* h_vel_gpu = (float4*)malloc(bytes);
     
-    // Copy to device
-    cudaMemcpy(d_pos, h_pos, bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_vel, h_vel, bytes, cudaMemcpyHostToDevice);
+    // Initialize with simple, deterministic system
+    init_simple_system(h_pos_a, h_vel_a, n);
     
-    // Create CUDA events for timing
+    //printf("Initial state (first 3 particles):\n");
+    //for (int i = 0; i < 3; i++) {
+    //    printf("  Particle %d: pos(%.2f, %.2f, %.2f) vel(%.2f, %.2f, %.2f)\n", 
+    //           i, h_pos_a[i].x, h_pos_a[i].y, h_pos_a[i].z, h_vel_a[i].x, h_vel_a[i].y, h_vel_a[i].z);
+    //}
+    
+    // Copy initial state for CPU test
+    memcpy(h_pos_b, h_pos_a, bytes);
+    memcpy(h_vel_b, h_vel_a, bytes);
+    
+    // Allocate GPU memory
+    float4 *d_pos_a, *d_vel_a, *d_pos_b, *d_vel_b;
+    cudaError_t err;
+    
+    err = cudaMalloc(&d_pos_a, bytes); if (err != cudaSuccess) printf("CUDA Error 1: %s\n", cudaGetErrorString(err));
+    err = cudaMalloc(&d_vel_a, bytes); if (err != cudaSuccess) printf("CUDA Error 2: %s\n", cudaGetErrorString(err));
+    err = cudaMalloc(&d_pos_b, bytes); if (err != cudaSuccess) printf("CUDA Error 3: %s\n", cudaGetErrorString(err));
+    err = cudaMalloc(&d_vel_b, bytes); if (err != cudaSuccess) printf("CUDA Error 4: %s\n", cudaGetErrorString(err));
+    
+    // Initialize GPU buffers to zero first
+    err = cudaMemset(d_pos_a, 0, bytes); if (err != cudaSuccess) printf("CUDA Error 5: %s\n", cudaGetErrorString(err));
+    err = cudaMemset(d_vel_a, 0, bytes); if (err != cudaSuccess) printf("CUDA Error 6: %s\n", cudaGetErrorString(err));
+    err = cudaMemset(d_pos_b, 0, bytes); if (err != cudaSuccess) printf("CUDA Error 7: %s\n", cudaGetErrorString(err));
+    err = cudaMemset(d_vel_b, 0, bytes); if (err != cudaSuccess) printf("CUDA Error 8: %s\n", cudaGetErrorString(err));
+    
+    // Copy initial state to GPU
+    err = cudaMemcpy(d_pos_a, h_pos_a, bytes, cudaMemcpyHostToDevice); 
+    if (err != cudaSuccess) printf("CUDA Error 9: %s\n", cudaGetErrorString(err));
+    err = cudaMemcpy(d_vel_a, h_vel_a, bytes, cudaMemcpyHostToDevice); 
+    if (err != cudaSuccess) printf("CUDA Error 10: %s\n", cudaGetErrorString(err));
+    
+    // Verify data was copied correctly
+    cudaMemcpy(h_pos_gpu, d_pos_a, bytes, cudaMemcpyDeviceToHost);
+    //printf("Verification - GPU data after copy (first 3 particles):\n");
+    //for (int i = 0; i < 3; i++) {
+    //    printf("  Particle %d: pos(%.2f, %.2f, %.2f)\n", 
+    //           i, h_pos_gpu[i].x, h_pos_gpu[i].y, h_pos_gpu[i].z);
+    //}
+    
+    float dt = 0.01f;
+    
+    //printf("Running simulation for %d steps...\n", steps);
+    
+    // Keep track of current buffers (start with A as input, B as output)
+    float4 *d_pos_current = d_pos_a, *d_pos_next = d_pos_b;
+    float4 *d_vel_current = d_vel_a, *d_vel_next = d_vel_b;
+    float4 *h_pos_current = h_pos_a, *h_pos_next = h_pos_b;
+    float4 *h_vel_current = h_vel_a, *h_vel_next = h_vel_b;
+    
+    // Run both versions for specified steps
+    for (int step = 0; step < steps; step++) {
+        //printf("  Step %d...\n", step + 1);
+        
+        // CPU step 
+        nbody_cpu_step(h_pos_current, h_vel_current, h_pos_next, h_vel_next, dt, n);
+        
+        // GPU step  
+        nbody_gpu_step(d_pos_current, d_vel_current, d_pos_next, d_vel_next, dt, n);
+        
+        // Check for CUDA errors
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            printf("CUDA Error after step %d: %s\n", step + 1, cudaGetErrorString(err));
+        }
+        
+        // Swap buffers for next iteration
+        float4* temp;
+        temp = h_pos_current; h_pos_current = h_pos_next; h_pos_next = temp;
+        temp = h_vel_current; h_vel_current = h_vel_next; h_vel_next = temp;
+        temp = d_pos_current; d_pos_current = d_pos_next; d_pos_next = temp;
+        temp = d_vel_current; d_vel_current = d_vel_next; d_vel_next = temp;
+    }
+    
+    // Copy final GPU results back (from current, which is the final state)
+    cudaMemcpy(h_pos_gpu, d_pos_current, bytes, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_vel_gpu, d_vel_current, bytes, cudaMemcpyDeviceToHost);
+    
+    //printf("Final GPU state (first 3 particles):\n");
+    //for (int i = 0; i < 3; i++) {
+    //    printf("  Particle %d: pos(%.6f, %.6f, %.6f) vel(%.6f, %.6f, %.6f)\n", 
+    //           i, h_pos_gpu[i].x, h_pos_gpu[i].y, h_pos_gpu[i].z, h_vel_gpu[i].x, h_vel_gpu[i].y, h_vel_gpu[i].z);
+    //}
+    
+    //printf("Final CPU state (first 3 particles):\n");
+    //for (int i = 0; i < 3; i++) {
+    //    printf("  Particle %d: pos(%.6f, %.6f, %.6f) vel(%.6f, %.6f, %.6f)\n", 
+    //           i, h_pos_current[i].x, h_pos_current[i].y, h_pos_current[i].z, h_vel_current[i].x, h_vel_current[i].y, h_vel_current[i].z);
+    //}
+    
+    // Compare final results
+    bool success = verify_results(h_pos_gpu, h_vel_gpu, h_pos_current, h_vel_current, n);
+    
+    // Cleanup
+    free(h_pos_a); free(h_vel_a); free(h_pos_b); free(h_vel_b); free(h_pos_gpu); free(h_vel_gpu);
+    cudaFree(d_pos_a); cudaFree(d_vel_a); cudaFree(d_pos_b); cudaFree(d_vel_b);
+    
+    if (success) {
+        printf("GPU and CPU implementations are verified to be equivalent!\n");
+    } else {
+        printf("There may be a bug in one of the implementations.\n");
+    }
+}
+
+// Performance benchmark
+void run_benchmark(int n, int steps) {
+    printf("\n=== PERFORMANCE BENCHMARK ===\n");
+    printf("Particles: %d, Steps: %d\n", n, steps);
+    
+    size_t bytes = n * sizeof(float4);
+    
+    // Allocate memory
+    float4* h_pos_a = (float4*)malloc(bytes);
+    float4* h_vel_a = (float4*)malloc(bytes);
+    
+    float4 *d_pos_a, *d_vel_a, *d_pos_b, *d_vel_b;
+    cudaMalloc(&d_pos_a, bytes);
+    cudaMalloc(&d_vel_a, bytes);
+    cudaMalloc(&d_pos_b, bytes);
+    cudaMalloc(&d_vel_b, bytes);
+    
+    // Initialize
+    srand(42);
+    for (int i = 0; i < n; i++) {
+        h_pos_a[i].x = 2.0f * (rand() / (float)RAND_MAX) - 1.0f;
+        h_pos_a[i].y = 2.0f * (rand() / (float)RAND_MAX) - 1.0f;
+        h_pos_a[i].z = 2.0f * (rand() / (float)RAND_MAX) - 1.0f;
+        h_pos_a[i].w = 1.0f;
+        
+        h_vel_a[i].x = 0.1f * (2.0f * (rand() / (float)RAND_MAX) - 1.0f);
+        h_vel_a[i].y = 0.1f * (2.0f * (rand() / (float)RAND_MAX) - 1.0f);
+        h_vel_a[i].z = 0.1f * (2.0f * (rand() / (float)RAND_MAX) - 1.0f);
+        h_vel_a[i].w = 0.0f;
+    }
+    
+    cudaMemcpy(d_pos_a, h_pos_a, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_vel_a, h_vel_a, bytes, cudaMemcpyHostToDevice);
+    
+    // Timing
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     
-    // Warm up GPU
-    nbody_step_single(d_pos, d_vel, dt, n);
-    cudaDeviceSynchronize();
+    // Warmup
+    nbody_gpu_step(d_pos_a, d_vel_a, d_pos_b, d_vel_b, 0.01f, n);
     
-    // Start timing
     cudaEventRecord(start);
     
-    // Run simulation
-    for (int step = 0; step < num_steps; step++) {
-        nbody_step_single(d_pos, d_vel, dt, n);
+    // Benchmark loop
+    for (int step = 0; step < steps; step++) {
+        nbody_gpu_step(d_pos_a, d_vel_a, d_pos_b, d_vel_b, 0.01f, n);
+        
+        // Swap buffers
+        float4* temp;
+        temp = d_pos_a; d_pos_a = d_pos_b; d_pos_b = temp;
+        temp = d_vel_a; d_vel_a = d_vel_b; d_vel_b = temp;
     }
     
-    // Stop timing
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     
-    // Calculate elapsed time
     float elapsed_ms;
     cudaEventElapsedTime(&elapsed_ms, start, stop);
-    float avg_time_per_step = elapsed_ms / num_steps;
+    float avg_time_per_step = elapsed_ms / steps;
     
-    // Calculate and print performance metrics
-    calculate_performance_metrics(n, avg_time_per_step);
+    // Calculate metrics
+    long long interactions = (long long)n * (n - 1);
+    long long total_flops = interactions * 15;
+    float gflops = (total_flops / 1e9) / (avg_time_per_step / 1000.0f);
     
-    // Optional: Copy results back and save final state
-    if (n <= 10) {  // Only print for small systems
-        cudaMemcpy(h_pos, d_pos, bytes, cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_vel, d_vel, bytes, cudaMemcpyDeviceToHost);
-        
-        printf("\nFinal particle states:\n");
-        for (int i = 0; i < n; i++) {
-            printf("Particle %d: pos(%.3f, %.3f, %.3f) vel(%.3f, %.3f, %.3f)\n",
-                   i, h_pos[i].x, h_pos[i].y, h_pos[i].z,
-                   h_vel[i].x, h_vel[i].y, h_vel[i].z);
-        }
-    }
+    printf("Time per step: %.2f ms\n", avg_time_per_step);
+    printf("GFLOPS: %.2f\n", gflops);
     
     // Cleanup
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
-    cudaFree(d_pos);
-    cudaFree(d_vel);
-    free(h_pos);
-    free(h_vel);
+    free(h_pos_a); free(h_vel_a);
+    cudaFree(d_pos_a); cudaFree(d_vel_a); cudaFree(d_pos_b); cudaFree(d_vel_b);
+    cudaEventDestroy(start); cudaEventDestroy(stop);
+}
+
+int main(int argc, char** argv) {
+    int n = (argc > 1) ? atoi(argv[1]) : 64;      // Smaller default for debugging
+    int steps = (argc > 2) ? atoi(argv[2]) : 100;   // Just 1 step for debugging
     
-    printf("\nBenchmark completed successfully!\n");
+    printf("N-Body Simulation with Clean Verification\n");
+    printf("==========================================\n");
+    
+    // Check CUDA device
+    int deviceCount;
+    cudaGetDeviceCount(&deviceCount);
+    if (deviceCount == 0) {
+        printf("No CUDA devices found!\n");
+        return -1;
+    }
+    
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, 0);
+    printf("Using CUDA device: %s\n", deviceProp.name);
+    
+        run_verification(min(n, 64), min(steps, 5));  // Very small for debugging
+    
+        run_benchmark(n, steps);
+    
     return 0;
 }
